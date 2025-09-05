@@ -1,0 +1,304 @@
+(function () {
+
+  const config = {
+    siteAddress: _spPageContextInfo.siteAbsoluteUrl, // Base site URL from SharePoint context
+  };
+
+  // -----------------------------
+  // Helpers for table rendering
+  // -----------------------------
+  const buildRow = (options, data) => {
+    let rowHtml = '<tr class="dynamic-table-row">';
+    options.columns.forEach(({ column }) => {
+      const isContactColumn = options.contactColumns?.some((cc) => cc.column === column);
+
+      if (isContactColumn) {
+        const contact = data[column] || {};
+        const contactName = contact.Title || "";
+        const contactLink = contact.Id || "";
+
+        rowHtml += `
+          <td class="dynamic-table-cell-contact">
+            ${config.siteAddress}/_layouts/15/userdisp.aspx?ID=${contactLink}
+              ${contactName}
+            </a>
+          </td>`;
+      } else {
+        rowHtml += `<td class="dynamic-table-cell">${data[column] || ""}</td>`;
+      }
+    });
+
+    rowHtml += "</tr>";
+    return rowHtml;
+  };
+
+  // -----------------------------
+  // Build Table from SharePoint
+  // -----------------------------
+  const buildTable = (options, target, tableClass = "") => {
+    const $target = $(`#${target}`);
+    $target.html(
+      '<img src="' +
+        config.siteAddress +
+        '/_layouts/15/images/loadingcirclests16.gif" style="width:16px;"/>Loading table...'
+    );
+
+    // Cell width for headers
+    const cellWidth =
+      options.equalWidth === true
+        ? "width: " + (100 / options.columns.length).toFixed(2) + "%"
+        : "min-width:60px";
+
+    // Person/Group columns expansion
+    const contactColumnNames = options.contactColumns?.map((col) => col.column) || [];
+    const expandedFields =
+      contactColumnNames.length > 0
+        ? contactColumnNames.map((col) => `${col}/Id,${col}/Title,${col}/EMail`)
+        : [];
+
+    // Select fields: always include Id
+    const selectFields = [
+      "Id",
+      ...options.columns.map((col) => col.column),
+      ...contactColumnNames,
+      ...expandedFields,
+    ];
+
+    // Build query string
+    let queryString = `$select=${selectFields.join(",")}&$top=5000`;
+    if (contactColumnNames.length > 0) {
+      queryString += `&$expand=${contactColumnNames.join(",")}`;
+    }
+
+    // Filters
+    if (options.filters && options.filters.length > 0) {
+      const filterString = options.filters
+        .map((f) => `${f.column} ${f.operator} ${f.value}`)
+        .join(" and ");
+      queryString += `&$filter=${filterString}`;
+    }
+
+    // Sorting
+    if (options.sort?.column) {
+      const direction = options.sort.direction?.toLowerCase() === "desc" ? "desc" : "asc";
+      queryString += `&$orderby=${options.sort.column} ${direction}`;
+    }
+
+    // REST URL
+    const targetUrl = `${config.siteAddress}/_api/web/lists/getbytitle('${options.listName}')/items?${queryString}`;
+    // console.log("buildTable URL:", targetUrl);
+
+    $.ajax({
+      url: targetUrl,
+      method: "GET",
+      headers: { Accept: "application/json;odata=verbose" },
+      success: function (response) {
+        const data = response.d.results || [];
+
+        let tableHead = `<table class="${tableClass}"><thead><tr>`;
+        options.columns.forEach((item) => {
+          tableHead += `<th class="dynamic-table-cell-header" style="${cellWidth}">${item.displayName}</th>`;
+        });
+        tableHead += "</tr></thead>";
+
+        let tableBody = "<tbody>";
+        data.forEach(function (item) {
+          tableBody += buildRow(options, item);
+        });
+        tableBody += "</tbody></table>";
+
+        $target.html(tableHead + tableBody);
+
+        // ðŸš€ Signal that content is ready for reflow
+        window.dispatchEvent(new CustomEvent("dynamicHtmlRendered", { detail: { targetId: target } }));
+
+        // ðŸ“· Reflow again when images inside this content finish loading
+        $target.find("img").each(function () {
+          if (!this.complete) {
+            this.addEventListener(
+              "load",
+              () => window.dispatchEvent(new CustomEvent("dynamicHtmlRendered", { detail: { targetId: target } })),
+              { once: true }
+            );
+          }
+        });
+      },
+      error: function (error) {
+        console.error("Error fetching table:", error);
+        $target.html("Failed to load table.");
+        // Still reflow so containers don't get stuck
+        window.dispatchEvent(new CustomEvent("dynamicHtmlRendered", { detail: { targetId: target } }));
+      }
+    });
+  };
+
+  // -----------------------------
+  // Display HTML content from SharePoint
+  // -----------------------------
+  const displayHTML = (options, target) => {
+    const $target = $(`#${target}`);
+    $target.html(
+      '<img src="' +
+        config.siteAddress +
+        '/_layouts/15/images/loadingcirclests16.gif" style="width:16px;"/>Loading content...'
+    );
+
+    const selectFields = ["Id", ...options.columns.map((col) => col.column)];
+    let queryString = `$select=${selectFields.join(",")}&$top=1`;
+
+    if (options.filters && options.filters.length > 0) {
+      const filterString = options.filters
+        .map((f) => `${f.column} ${f.operator} ${f.value}`)
+        .join(" and ");
+      queryString += `&$filter=${filterString}`;
+    }
+
+    const targetUrl = `${config.siteAddress}/_api/web/lists/getbytitle('${options.listName}')/items?${queryString}`;
+    // console.log("displayHTML URL:", targetUrl);
+
+    $.ajax({
+      url: targetUrl,
+      method: "GET",
+      headers: { Accept: "application/json;odata=verbose" },
+      success: function (response) {
+        const data = response.d.results || [];
+        const htmlContent = data.length > 0 ? data[0].Content : "No content found.";
+        $target.html(htmlContent);
+
+        // Keep main tab container height in sync (legacy path)
+        requestAnimationFrame(() => {
+          const container = $("#tab-content-container");
+          const activeTab = container.find(".tab-content.active");
+          if (activeTab.length) {
+            gsap.to(container, {
+              height: activeTab.outerHeight(true) + 100,
+              duration: 0.3,
+              ease: "power2.out"
+            });
+          }
+        });
+
+        // ðŸš€ Signal that specific target finished rendering
+        window.dispatchEvent(new CustomEvent("dynamicHtmlRendered", { detail: { targetId: target } }));
+
+        // ðŸ“· Reflow again when images inside this content finish loading
+        $target.find("img").each(function () {
+          if (!this.complete) {
+            this.addEventListener(
+              "load",
+              () => window.dispatchEvent(new CustomEvent("dynamicHtmlRendered", { detail: { targetId: target } })),
+              { once: true }
+            );
+          }
+        });
+
+        // ðŸŽ  Example: carousel hook remains (optional)
+        if (target === "resources" && typeof window.initCarousel === "function") {
+          const tryInit = () => {
+            const carousel = document.getElementById("carousel");
+            if (carousel && carousel.children.length > 0) {
+              window.initCarousel("carousel");
+              // After carousel is ready, reflow height
+              window.dispatchEvent(new CustomEvent("dynamicHtmlRendered", { detail: { targetId: target } }));
+            } else {
+              setTimeout(tryInit, 200);
+            }
+          };
+          tryInit();
+        }
+      },
+      error: function (error) {
+        console.error("Error fetching content:", error);
+        $target.html("Failed to load content.");
+        // Still reflow so containers don't get stuck
+        window.dispatchEvent(new CustomEvent("dynamicHtmlRendered", { detail: { targetId: target } }));
+      }
+    });
+  };
+  // ---------------------------------------
+  // âœ… Export to global scope
+  // ---------------------------------------
+  window.buildComponentFromSPBackend = {
+    buildTable,
+    displayHTML
+  };
+
+  // ---------------------------------------
+  // âœ… UIReflow (single source of truth)
+  // ---------------------------------------
+  function reflowHeightsForTarget(targetId) {
+    const $node = $('#' + targetId);
+    const $tabContainer = $("#tab-content-container");
+    const $activeTab = $tabContainer.find(".tab-content.active");
+    const $subtabContainer = $(".subtab-content-container");
+    let $activeSubtab = $(".subtab-content.active");
+
+    // If the event's node is inside a subtab, resolve to that subtab
+    if ($node.length) {
+      const $closestSubtab = $node.closest(".subtab-content");
+      if ($closestSubtab.length) $activeSubtab = $closestSubtab;
+    }
+
+    if ($activeSubtab.length && $subtabContainer.length) {
+      gsap.to($subtabContainer, {
+        height: $activeSubtab.outerHeight(true),
+        duration: 0.3,
+        ease: "power2.out"
+      });
+    }
+
+    if ($activeTab.length) {
+      gsap.to($tabContainer, {
+        height: $activeTab.outerHeight(true) + 100,
+        duration: 0.3,
+        ease: "power2.out"
+      });
+    }
+  }
+
+  function reflowHeights() {
+    const $tabContainer = $("#tab-content-container");
+    const $activeTab = $tabContainer.find(".tab-content.active");
+    const $subtabContainer = $(".subtab-content-container");
+    const $activeSubtab = $(".subtab-content.active");
+
+    if ($activeSubtab.length) {
+      gsap.to($subtabContainer, {
+        height: $activeSubtab.outerHeight(true),
+        duration: 0.3,
+        ease: "power2.out"
+      });
+    }
+    if ($activeTab.length) {
+      gsap.to($tabContainer, {
+        height: $activeTab.outerHeight(true) + 100,
+        duration: 0.3,
+        ease: "power2.out"
+      });
+    }
+  }
+
+  // Export reflow API
+  window.UIReflow = { reflowHeights, reflowHeightsForTarget };
+
+  // Listen for content-finished signals from loaders
+  window.addEventListener("dynamicHtmlRendered", (e) => {
+    const targetId = e.detail?.targetId;
+    if (targetId) {
+      requestAnimationFrame(() => window.UIReflow.reflowHeightsForTarget(targetId));
+    } else {
+      requestAnimationFrame(() => window.UIReflow.reflowHeights());
+    }
+  });
+
+  // ðŸ”” Let other scripts know UIReflow is ready (so guarded calls can proceed)
+  window.dispatchEvent(new CustomEvent("UIReflowReady"));
+
+  // Debounced resize -> keep layout responsive
+  let resizeTimer;
+  $(window).on("resize", function () {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => window.UIReflow.reflowHeights(), 120);
+  });
+
+})();
